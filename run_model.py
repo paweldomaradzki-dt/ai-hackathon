@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+import urllib.parse
 
 import httpx
 import uvicorn
@@ -32,6 +33,42 @@ def verify_signature(body: bytes, sig_header: str) -> bool:
     return hmac.compare_digest(expected, sig_header)
 
 
+async def search_similar_issues(owner: str, repo: str, title: str, body: str, current_number: int) -> list:
+    body_words = " ".join((body or "").split()[:100])
+    query = f"{title} {body_words}".strip()
+    q = urllib.parse.quote(f"{query} repo:{owner}/{repo} is:issue")
+    url = f"https://api.github.com/search/issues?q={q}&per_page=5"
+
+    async with httpx.AsyncClient() as http:
+        resp = await http.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+
+    if resp.status_code != 200:
+        print(f"GitHub search failed: {resp.status_code} {resp.text}")
+        return []
+
+    items = resp.json().get("items", [])
+    return [i for i in items if i["number"] != current_number]
+
+
+async def post_comment(comments_url: str, comment: str) -> None:
+    async with httpx.AsyncClient() as http:
+        resp = await http.post(
+            comments_url,
+            json={"body": comment},
+            headers={
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+    print(f"Posted comment to GitHub: {resp.status_code}")
+
+
 @app.post("/webhook")
 async def webhook(
     request: Request,
@@ -51,19 +88,39 @@ async def webhook(
             raise HTTPException(status_code=401, detail="Unauthorized")
 
     payload = json.loads(body)
-    print(f"\n--- GitHub Event: {x_github_event} / action: {payload.get('action')} ---")
+    action = payload.get("action")
+    print(f"\n--- GitHub Event: {x_github_event} / action: {action} ---")
     print(json.dumps(payload, indent=2))
 
+    if x_github_event != "issues" or action != "opened":
+        return {"ok": True}
+
     issue = payload.get("issue", {})
-    content = issue.get("body") or ""
+    issue_title = issue.get("title") or ""
+    issue_body = issue.get("body") or ""
+    issue_number = issue.get("number")
     comments_url = issue.get("comments_url", "")
-    print(f"\n--- Sending to Claude ---\n{content!r}\n---")
+    repo = payload.get("repository", {})
+    repo_owner = repo.get("owner", {}).get("login", "")
+    repo_name = repo.get("name", "")
+
+    if github_token and repo_owner and repo_name:
+        similar = await search_similar_issues(repo_owner, repo_name, issue_title, issue_body, issue_number)
+        if similar:
+            refs = ", ".join(f"#{i['number']} [{i['title']}]({i['html_url']})" for i in similar)
+            comment = f"Similar issues already exist — you may find answers there:\n\n{refs}"
+            print(f"\n--- Similar issues found, skipping Claude ---\n{refs}")
+            if comments_url:
+                await post_comment(comments_url, comment)
+            return {"ok": True}
+
+    print(f"\n--- No similar issues found, sending to Claude ---\n{issue_body!r}\n---")
 
     message = client.messages.create(
         model=model,
         system=system_prompt,
         messages=[
-            {"role": "user", "content": content or "(empty issue body)"},
+            {"role": "user", "content": issue_body or "(empty issue body)"},
         ],
         max_tokens=1024,
     )
@@ -72,16 +129,7 @@ async def webhook(
     print(f"\n--- Claude response ---\n{text}")
 
     if comments_url and github_token:
-        async with httpx.AsyncClient() as http:
-            resp = await http.post(
-                comments_url,
-                json={"body": text},
-                headers={
-                    "Authorization": f"Bearer {github_token}",
-                    "Accept": "application/vnd.github+json",
-                },
-            )
-        print(f"Posted comment to GitHub: {resp.status_code}")
+        await post_comment(comments_url, text)
 
     return {"ok": True}
 
