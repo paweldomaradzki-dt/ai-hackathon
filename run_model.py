@@ -66,7 +66,7 @@ async def post_to_slack(issue_url: str, message: str) -> None:
             slack_webhook_url,
             json={
                 "ENVIRONMENT": environment,
-                "MESSAGE": f"{issue_url}\n\n{message}",
+                "MESSAGE": f"{message}\n\n{issue_url}",
             },
             headers={"Content-Type": "application/json"},
         )
@@ -125,12 +125,13 @@ async def webhook(
     if github_token and repo_owner and repo_name:
         similar = await search_similar_issues(repo_owner, repo_name, issue_title, issue_body, issue_number)
         if similar:
-            refs = ", ".join(f"#{i['number']} [{i['title']}]({i['html_url']})" for i in similar)
-            comment = f"Similar issues already exist — you may find answers there:\n\n{refs}"
-            print(f"\n--- Similar issues found, skipping Claude ---\n{refs}")
+            latest = similar[0]
+            github_comment = f"Similar issue already exists — you may find answers there:\n\n#{latest['number']} [{latest['title']}]({latest['html_url']})"
+            slack_message = f"Similar issue already exists: {latest['html_url']}"
+            print(f"\n--- Similar issues found, skipping Claude ---\n{latest['html_url']}")
             if comments_url:
-                await post_comment(comments_url, comment)
-            await post_to_slack(issue_url, comment)
+                await post_comment(comments_url, github_comment)
+            await post_to_slack(issue_url, slack_message)
             return {"ok": True}
 
     print(f"\n--- No similar issues found, sending to Claude ---\n{issue_body!r}\n---")
