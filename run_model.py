@@ -18,6 +18,8 @@ endpoint = os.environ.get("CLAUDE_ENDPOINT", "")
 model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 github_token = os.environ.get("GITHUB_TOKEN", "")
+slack_webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
+environment = os.environ.get("ENVIRONMENT", "")
 system_prompt = os.environ.get(
     "CLAUDE_SYSTEM_PROMPT",
     "You are an assistant that analyzes GitHub webhook events.",
@@ -54,6 +56,21 @@ async def search_similar_issues(owner: str, repo: str, title: str, body: str, cu
 
     items = resp.json().get("items", [])
     return [i for i in items if i["number"] != current_number]
+
+
+async def post_to_slack(issue_url: str, message: str) -> None:
+    if not slack_webhook_url:
+        return
+    async with httpx.AsyncClient() as http:
+        resp = await http.post(
+            slack_webhook_url,
+            json={
+                "ENVIRONMENT": environment,
+                "MESSAGE": f"{issue_url}\n\n{message}",
+            },
+            headers={"Content-Type": "application/json"},
+        )
+    print(f"Posted to Slack: {resp.status_code} {resp.text}")
 
 
 async def post_comment(comments_url: str, comment: str) -> None:
@@ -103,6 +120,7 @@ async def webhook(
     repo = payload.get("repository", {})
     repo_owner = repo.get("owner", {}).get("login", "")
     repo_name = repo.get("name", "")
+    issue_url = f"https://github.com/{repo_owner}/{repo_name}/issues/{issue_number}"
 
     if github_token and repo_owner and repo_name:
         similar = await search_similar_issues(repo_owner, repo_name, issue_title, issue_body, issue_number)
@@ -112,6 +130,7 @@ async def webhook(
             print(f"\n--- Similar issues found, skipping Claude ---\n{refs}")
             if comments_url:
                 await post_comment(comments_url, comment)
+            await post_to_slack(issue_url, comment)
             return {"ok": True}
 
     print(f"\n--- No similar issues found, sending to Claude ---\n{issue_body!r}\n---")
@@ -130,6 +149,7 @@ async def webhook(
 
     if comments_url and github_token:
         await post_comment(comments_url, text)
+    await post_to_slack(issue_url, text)
 
     return {"ok": True}
 
