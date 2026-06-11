@@ -118,7 +118,7 @@ async def webhook(
 
     message = client.messages.create(
         model=model,
-        system=system_prompt,
+        system=system_prompt + " You are analyzing issues for a Dynatrace repository. Always focus your analysis on Dynatrace products, observability, monitoring, and APM topics. If an issue is unrelated to Dynatrace, briefly note that and suggest the appropriate channel.",
         messages=[
             {"role": "user", "content": issue_body or "(empty issue body)"},
         ],
